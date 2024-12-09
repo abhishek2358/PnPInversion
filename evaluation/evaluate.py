@@ -4,7 +4,7 @@ import os
 import numpy as np
 from PIL import Image
 import csv
-from evaluation.matrics_calculator import MetricsCalculator
+from matrics_calculator import MetricsCalculator
 
 def mask_decode(encoded_mask,image_shape=[512,512]):
     length=image_shape[0]*image_shape[1]
@@ -100,6 +100,7 @@ def calculate_metric(metrics_calculator,metric, src_image, tgt_image, src_mask, 
 all_tgt_image_folders={
     # results of comparing inversion
     # ---
+    "1_ddim+fgps+p2p":"output/ddim+fgps+p2p/annotation_images",
     "1_ddim+p2p":"output/ddim+p2p/annotation_images",
     "1_null-text-inversion+p2p_a800":"output/null-text-inversion+p2p_a800/annotation_images",
     "1_null-text-inversion+p2p_3090":"output/null-text-inversion+p2p_3090/annotation_images",
@@ -281,5 +282,7 @@ if __name__=="__main__":
         with open(result_path,'a+',newline="") as f:
             csv_write = csv.writer(f)
             csv_write.writerow(evaluation_result)
+        
+        
         
         

@@ -1,27 +1,37 @@
 
 from models.p2p.scheduler_dev import DDIMSchedulerDev
-from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectInversion
+from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectInversion, FGPSInversion, NullInversionV2
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
-from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
+from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch,p2p_guidance_forward_fgps,p2p_guidance_forward_fgps_target
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
 from diffusers import StableDiffusionPipeline
 from utils.utils import load_512, latent2image, txt_draw
 from PIL import Image
 import numpy as np
-
+import torch
+import pandas as pd
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50) -> None:
+    def __init__(self, method_list, device, num_ddim_steps=1000) -> None:
         self.device=device
         self.method_list=method_list
         self.num_ddim_steps=num_ddim_steps
+        print("num ddim steps", self.num_ddim_steps)    
         # init model
         self.scheduler = DDIMSchedulerDev(beta_start=0.00085,
                                     beta_end=0.012,
                                     beta_schedule="scaled_linear",
                                     clip_sample=False,
                                     set_alpha_to_one=False)
+
         self.ldm_stable = StableDiffusionPipeline.from_pretrained(
             "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler).to(device)
+
+
+        # self.ldm_stable = StableDiffusionPipeline.from_pretrained(
+        # "stabilityai/stable-diffusion-2-1-base", scheduler=self.scheduler,
+        # token = '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').to(device)
+
+
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
 
         
@@ -42,11 +52,18 @@ class P2PEditor:
                 eq_params=None,
                 is_replace_controller=False,
                 use_inversion_guidance=False,
-                dilate_mask=1,):
+                dilate_mask=1,
+                save_path=None):
         if edit_method=="ddim+p2p":
             return self.edit_image_ddim(image_path, prompt_src, prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
-                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller,save_path=save_path)
+        
+        if edit_method=="ddim+fgps+p2p":
+            return self.edit_image_ddim_fgps(image_path, prompt_src, prompt_tar, guidance_scale=guidance_scale, 
+                                        cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller,save_path=save_path)
+        
         elif edit_method in ["null-text-inversion+p2p", "null-text-inversion+p2p_a800", "null-text-inversion+p2p_3090"]:
             return self.edit_image_null_text_inversion(image_path, prompt_src, prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
@@ -134,6 +151,137 @@ class P2PEditor:
         else:
             raise NotImplementedError(f"No edit method named {edit_method}")
 
+
+
+
+    def edit_image_ddim_fgps(
+        self,
+        image_path,
+        prompt_src,
+        prompt_tar,
+        guidance_scale=7.5,
+        cross_replace_steps=0.4,
+        self_replace_steps=0.6,
+        blend_word=None,
+        eq_params=None,
+        is_replace_controller=False,
+        save_path=None,
+    ):
+        image_gt = load_512(image_path)
+        prompts = [prompt_src, prompt_tar]
+        null_inversion = NullInversionV2(model=self.ldm_stable,
+                                    num_ddim_steps=self.num_ddim_steps)
+        _, _, x_stars, uncond_embeddings = null_inversion.invert(
+            image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale,num_inner_steps=0)
+        
+
+        # cross_replace_steps = 0.3
+        # self_replace_steps = 0.7
+        
+        # null_inversion = FGPSInversion(model=self.ldm_stable,
+        #                             num_ddim_steps=self.num_ddim_steps)
+        # _, _, x_stars1, scaled_norm_grad_list = null_inversion.invert(
+        #     image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale, save_path=save_path)
+        
+        print("ss111s")
+        
+        x_t = x_stars[-1]
+
+        controller = AttentionStore()
+        
+        # reconstruct_latent, x_t = p2p_guidance_forward_fgps_target(model=self.ldm_stable, 
+        #                                prompt=prompts, 
+        #                                controller=controller, 
+        #                                latent=x_t, 
+        #                                num_inference_steps=self.num_ddim_steps, 
+        #                                guidance_scale=guidance_scale, 
+        #                                generator=None, 
+        #                                save_path=save_path,
+        #                                branch_name = "source",
+        #                                image_gt=image_gt,
+        #                                source_latents=scaled_norm_grad_list)
+        reconstruct_latent, x_t ,source_latents, latents_list = p2p_guidance_forward_fgps(model=self.ldm_stable, 
+                                       prompt=prompts,  ####TODO: chnage here for full prompt
+                                       controller=controller, 
+                                       latent=x_t, 
+                                       num_inference_steps=self.num_ddim_steps, 
+                                       guidance_scale=guidance_scale, 
+                                       generator=None, 
+                                       #uncond_embeddings=uncond_embeddings,
+                                       save_path=save_path,
+                                       branch_name = "source",
+                                       image_gt=image_gt)
+        x_stars.reverse()
+        org_latents = torch.stack(x_stars)
+        recon_latents = torch.stack(latents_list)
+
+        xx_scalar = torch.norm(org_latents - recon_latents, p=2,dim=(1,2,3,4)).cpu().tolist()
+
+        # File to which you want to append
+        file_name = "/home/abhi2358/code/project/PnPInversion/models/l2_distances_fgps.csv"
+
+        try:
+            # Load the existing CSV file
+            df = pd.read_csv(file_name)
+        except FileNotFoundError:
+            # If file doesn't exist, create a new DataFrame
+            df = pd.DataFrame()
+
+        # Handle case where the DataFrame is empty (no rows or columns)
+        if df.empty:
+            df = pd.DataFrame({f"Distance_1": xx_scalar})  # Initialize with the first column
+        else:
+            # Add a new column with a dynamic name
+            new_column_name = f"Distance_{len(df.columns) + 1}"
+            df[new_column_name] = xx_scalar
+
+        # Save the updated DataFrame to the CSV file
+        df.to_csv(file_name, index=False)
+
+
+        #add the source latents and the scaled norm grad latents for all list items
+        # combined_latents = []   
+        # for i in range(len(scaled_norm_grad_list)):
+        #     a = scaled_norm_grad_list[i]
+        #     b = source_latents[i]
+        #     avg = 0.01*a + 0.99*b
+        #     combined_latents.append(avg)
+
+        
+        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        
+        ########## edit ##########
+        cross_replace_steps = {
+            'default_': cross_replace_steps,
+        }
+        controller = make_controller(pipeline=self.ldm_stable,
+                                    prompts=prompts,
+                                    is_replace_controller=is_replace_controller,
+                                    cross_replace_steps=cross_replace_steps,
+                                    self_replace_steps=self_replace_steps,
+                                    blend_words=blend_word,
+                                    equilizer_params=eq_params,
+                                    num_ddim_steps=self.num_ddim_steps,
+                                    device=self.device)
+        latents, _ = p2p_guidance_forward_fgps_target(model=self.ldm_stable, 
+                                       prompt=prompts, 
+                                       controller=controller, 
+                                       latent=x_t, 
+                                       num_inference_steps=self.num_ddim_steps, 
+                                       guidance_scale=guidance_scale, 
+                                       #uncond_embeddings=uncond_embeddings,
+                                       generator=None, 
+                                       save_path=save_path,
+                                       branch_name = "target",
+                                       image_gt=image_gt,
+                                       source_latents=source_latents)
+
+        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+
+        return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
+
+
     def edit_image_ddim(
         self,
         image_path,
@@ -145,10 +293,12 @@ class P2PEditor:
         blend_word=None,
         eq_params=None,
         is_replace_controller=False,
+        save_path=None,
     ):
         image_gt = load_512(image_path)
         prompts = [prompt_src, prompt_tar]
 
+        print("Hesy")
         null_inversion = NullInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
         _, _, x_stars, uncond_embeddings = null_inversion.invert(
@@ -156,14 +306,45 @@ class P2PEditor:
         x_t = x_stars[-1]
 
         controller = AttentionStore()
-        reconstruct_latent, x_t = p2p_guidance_forward(model=self.ldm_stable, 
+        reconstruct_latent, x_t, latents_list = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=[prompt_src], 
                                        controller=controller, 
                                        latent=x_t, 
                                        num_inference_steps=self.num_ddim_steps, 
                                        guidance_scale=guidance_scale, 
                                        generator=None, 
-                                       uncond_embeddings=uncond_embeddings)
+                                       uncond_embeddings=uncond_embeddings,
+                                       save_path=save_path,
+                                       branch_name = "source")
+        # import pdb
+        # pdb.set_trace()
+        x_stars.reverse()
+        org_latents = torch.stack(x_stars)
+        recon_latents = torch.stack(latents_list)
+
+        xx_scalar = torch.norm(org_latents - recon_latents, p=2,dim=(1,2,3,4)).cpu().tolist()
+
+        # File to which you want to append
+        file_name = "/home/abhi2358/code/project/PnPInversion/models/l2_distances.csv"
+
+        try:
+            # Load the existing CSV file
+            df = pd.read_csv(file_name)
+        except FileNotFoundError:
+            # If file doesn't exist, create a new DataFrame
+            df = pd.DataFrame()
+
+        # Handle case where the DataFrame is empty (no rows or columns)
+        if df.empty:
+            df = pd.DataFrame({f"Distance_1": xx_scalar})  # Initialize with the first column
+        else:
+            # Add a new column with a dynamic name
+            new_column_name = f"Distance_{len(df.columns) + 1}"
+            df[new_column_name] = xx_scalar
+
+        # Save the updated DataFrame to the CSV file
+        df.to_csv(file_name, index=False)
+        
         
 
         reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
@@ -183,14 +364,16 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device)
-        latents, _ = p2p_guidance_forward(model=self.ldm_stable, 
+        latents, _, latents_list2= p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
                                        latent=x_t, 
                                        num_inference_steps=self.num_ddim_steps, 
                                        guidance_scale=guidance_scale, 
                                        generator=None, 
-                                       uncond_embeddings=uncond_embeddings)
+                                       uncond_embeddings=uncond_embeddings,
+                                       save_path=save_path,
+                                       branch_name = "target")
 
         images = latent2image(model=self.ldm_stable.vae, latents=latents)
 
@@ -432,9 +615,9 @@ class P2PEditor:
         _, _, x_stars, noise_loss_list = null_inversion.invert(
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
-
+        print("ss")
         controller = AttentionStore()
-        
+        # import pdb; pdb.set_trace()
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -444,9 +627,9 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
     
-        
+        # import pdb; pdb.set_trace()
         reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-
+        # pdb.set_trace()
         ########## edit ##########
         cross_replace_steps = {
             'default_': cross_replace_steps,
@@ -470,7 +653,7 @@ class P2PEditor:
                                        num_inference_steps=self.num_ddim_steps, 
                                        guidance_scale=guidance_scale, 
                                        generator=None)
-
+        # import pdb; pdb.set_trace()
         images = latent2image(model=self.ldm_stable.vae, latents=latents)
 
         
@@ -511,8 +694,7 @@ class P2PEditor:
                                        num_inference_steps=self.num_ddim_steps, 
                                        guidance_scale=forward_guidance_scale, 
                                        generator=None)
-    
-        
+
         reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
 
         ########## edit ##########
@@ -538,7 +720,6 @@ class P2PEditor:
                                        num_inference_steps=self.num_ddim_steps, 
                                        guidance_scale=forward_guidance_scale, 
                                        generator=None)
-
         images = latent2image(model=self.ldm_stable.vae, latents=latents)
 
         

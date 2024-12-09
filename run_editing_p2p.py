@@ -38,6 +38,7 @@ def setup_seed(seed=1234):
 
 image_save_paths={
     "ddim+p2p":"ddim+p2p",
+    "ddim+fgps+p2p":"ddim+fgps+p2p",
     "null-text-inversion+p2p":"null-text-inversion+p2p",
     "null-text-inversion+p2p_a800":"null-text-inversion+p2p_a800",
     "null-text-inversion+p2p_3090":"null-text-inversion+p2p_3090",
@@ -110,9 +111,10 @@ if __name__ == "__main__":
         editing_instruction = item["editing_instruction"]
         blended_word = item["blended_word"].split(" ") if item["blended_word"] != "" else []
         mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
-
         for edit_method in edit_method_list:
             present_image_save_path=image_path.replace(data_path, os.path.join(output_path,image_save_paths[edit_method]))
+            if edit_method=="ddim+fgps+p2p":
+                rerun_exist_images=True
             if ((not os.path.exists(present_image_save_path)) or rerun_exist_images):
                 print(f"editing image [{image_path}] with [{edit_method}]")
                 setup_seed()
@@ -135,6 +137,7 @@ if __name__ == "__main__":
                                         use_inversion_guidance=True,
                                         recon_lr=1,
                                         recon_t=400,
+                                        save_path=present_image_save_path,
                                         )
                 if not os.path.exists(os.path.dirname(present_image_save_path)):
                     os.makedirs(os.path.dirname(present_image_save_path))
@@ -142,7 +145,12 @@ if __name__ == "__main__":
                 
                 print(f"finish")
                 
+                
             else:
                 print(f"skip image [{image_path}] with [{edit_method}]")
+            
+            
+            
+        
         
         
